@@ -41,7 +41,7 @@ function(input, output, session)
     db %>%
       tbl("trips") %>%
       filter(between(start_time, unixepoch(!!input$date[1]), unixepoch(!!input$date[2]))) %>%
-      select(start_time, week_day) %>%
+      select(week_day) %>%
       as_tibble() %>%
       mutate(week_day = wday(week_day, label = TRUE, abbr=FALSE)) %>%
       group_by(week_day) %>%
