@@ -1,0 +1,251 @@
+---
+title: "How Does a Bike-Share Navigate Speedy Success?"
+author: "IronKing24"
+date: "`r Sys.Date()`"
+params:
+  date: NA
+  path:
+output:
+  html_document: 
+    code_folding: hide
+    toc: yes
+    df_print: kable
+---
+
+```{r lib, echo=FALSE, message=FALSE}
+library(DBI)
+library(RSQLite)
+library(tidyverse)
+library(DT)
+library(sf)
+library(leaflet)
+```
+
+```{r init}
+db <- try(dbConnect(SQLite(), dbname = file.path(params$path, "../data/Divvy.sqlite")))
+```
+
+# Ask
+
+## Business task
+
+Find the matching patterns between members and none members to influence the new marketing strategy that is aimed to increase members count.
+
+# Prepare
+
+## Data sources
+
+The trips and stations data was located at [Divvy's historical data](https://divvy-tripdata.s3.amazonaws.com/index.html) released under the [data license agreement](https://divvybikes.com/data-license-agreement).
+
+# Process
+
+<details>
+
+<summary>Data change log</summary>
+
+1.  The `trips data files from the ye`ar 2013 up to the year 2019 where merged under a single file.
+2.  The columns of the station names where removed.
+3.  The column headers' names were unified to (id, start_time, stop_time, from_station_id, to_station_id, user_type, gender, birth_year).
+4.  The genders where changed for 0 for null, 1 for male, and 2 for female.
+5.  The the customers value was changed to 0, the subscribers value was changed to 1, and the dependent value was changed to 2.
+6.  Removed trips with the same id.
+7.  Removed trips with negative duration.
+
+</details>
+
+# Analyze
+
+```{R Analyze-inline-avg}
+avg_duration <- db %>%
+  tbl("trips") %>%
+  filter(between(start_time, unixepoch(!!params$date[1]), unixepoch(!!params$date[2]))) %>%
+  select(duration) %>%
+  summarize(avg = round(mean(duration, na.rm = TRUE), 2)) %>%
+  as_tibble() %>%
+  seconds_to_period() %>%
+  toString()
+```
+
+```{R Analyze-inline-max}
+max_duration <- db %>%
+  tbl("trips") %>%
+  filter(between(start_time, unixepoch(!!params$date[1]), unixepoch(!!params$date[2]))) %>%
+  select(duration) %>%
+  summarize(max = max(duration, na.rm = TRUE)) %>%
+  as_tibble() %>%
+  seconds_to_period() %>%
+  toString()
+```
+
+```{R Analyze-inline-mode}
+mode_duration <- db %>%
+  tbl("trips") %>%
+  filter(between(start_time, unixepoch(!!params$date[1]), unixepoch(!!params$date[2]))) %>%
+  select(week_day) %>%
+  as_tibble() %>%
+  mutate(week_day = wday(week_day, label = TRUE, abbr = FALSE)) %>%
+  group_by(week_day) %>%
+  summarize(n = n()) %>%
+  slice_max(n) %>%
+  .$week_day %>%
+  toString()
+```
+
+The mean ride duration is `r avg_duration`.
+
+The maximum trip duration is `r max_duration`.
+
+The mode of the week day is `r mode_duration`.
+
+```{r Analyze-pivot-table}
+db %>% 
+  tbl("trips") %>%
+  filter(between(start_time, unixepoch(!!params$date[1]), unixepoch(!!params$date[2]))) %>%
+  select(week_day, duration, user_type) %>%
+  mutate(user_type = case_match(user_type , 0 ~ "Customer", 1 ~ 'Subscriber', 2 ~ "Dependent")) %>%
+  as_tibble() %>%
+  mutate(week_day =  fct_relevel(wday(week_day, label = TRUE, abbr = FALSE))) %>%
+  group_by(week_day, user_type) %>%
+  summarize(.groups="keep", "Number of trips" =  n(), "Average trip duration" = mean(duration, na.rm = TRUE)) %>%
+  rename("Day of the week" = week_day, "User type" = user_type) %>%
+  datatable(caption = "User type and week day pivot table", filter = 'top', options = list(pageLength = 21))
+```
+
+# Share
+
+```{r Share-bar-blot}
+# bar blot of week days
+ggplot(
+  db %>% 
+    tbl("trips") %>%
+    filter(between(start_time, unixepoch(!!params$date[1]), unixepoch(!!params$date[2]))) %>%
+    select(week_day, user_type, gender) %>%
+    as_tibble() %>%
+    mutate(week_day = fct_relevel(wday(week_day, label = TRUE, abbr = FALSE)),
+           user_type = case_match(user_type , 0 ~ "Customer", 1 ~ 'Subscriber', 2 ~ "Dependent"),
+           gender = case_match(gender , 0 ~ "Unknown", 1 ~ 'Male', 2 ~ "Female", 9 ~ "Not applicable")) %>%
+    group_by(gender, week_day, user_type) %>%
+    summarise(n = n(), .groups="keep"),
+  aes(x = week_day, y = n ,fill = user_type)) +
+  geom_bar(stat = 'identity', position="stack") +
+  facet_wrap(~gender) +
+  labs(fill = 'User type') +
+  geom_text(aes(label = n), position = position_stack(vjust = 0.5)) +
+  xlab("Day of the week") +
+  ylab("Number of trips")
+```
+
+```{R Share-density-plot}
+#time series for ride count
+ggplot(
+  db %>% 
+    tbl("trips") %>%
+    filter(between(start_time, unixepoch(!!params$date[1]), unixepoch(!!params$date[2]))) %>%
+    select(user_type, start_time) %>%
+    as_tibble() %>%
+    mutate(
+      start_time = date(as.POSIXct(start_time, origin = "1970-1-1")),
+      user_type = case_match(user_type , 0 ~ "Customer", 1 ~ 'Subscriber', 2 ~ "Dependent")), 
+  aes(x = start_time, group = user_type, fill = user_type)) +
+  geom_density(alpha = 0.5) +
+  labs(fill = 'User type') +
+  xlab("Date") +
+  ylab("Number of trips") +
+  scale_y_continuous()
+```
+
+```{R Share-pie-plot-gender}
+#pie chart for users gender groups
+ggplot(
+  db %>% 
+    tbl("trips") %>%
+    filter(between(start_time, unixepoch(!!params$date[1]), unixepoch(!!params$date[2]))) %>%
+    select(user_type, gender) %>%
+    group_by(user_type, gender) %>%
+    summarise(Number = n(), .groups = "keep") %>%
+    as_tibble() %>%
+    mutate(
+      user_type = case_match(user_type , 0 ~ "Customer", 1 ~ 'Subscriber', 2 ~ "Dependent"),
+      gender = case_match(gender , 0 ~ "Unknown", 1 ~ 'Male', 2 ~ "Female", 9 ~ "Not applicable")),
+  aes(x = "", y = user_type, fill = user_type)) + 
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar(theta = "y", start = 0) +
+  theme_void() +
+  geom_text(aes(x = "", y = user_type,label = gender), position = position_stack(vjust = 0.5)) +
+  labs(fill = 'User type')
+```
+
+```{R Share-pie-plot-age}
+#pie chart for age groups
+ggplot(
+  db %>% 
+    tbl("trips") %>%
+    filter(between(start_time, unixepoch(!!params$date[1]), unixepoch(!!params$date[2])) & birth_year > 0) %>%
+    select(birth_year, start_time, user_type) %>%
+    as_tibble() %>%
+    mutate(
+      user_type = case_match(user_type , 0 ~ "Customer", 1 ~ 'Subscriber', 2 ~ "Dependent"),
+      age = year(as.POSIXct(start_time, origin = "1970-1-1")) - birth_year,
+      cat = case_when(
+        age < 1 ~ "Infant (less than 1)",
+        age >= 1 & age <= 12 ~ "Child (1-12)",
+        age >= 13 & age <= 17 ~ "Adolescent (13-17)",
+        age >= 18 & age <= 65 ~ "Adult (18-65)",
+        age > 65 ~ "Elderly (65+)")) %>%
+    group_by(user_type, cat) %>%
+    summarise(Number = n(), .groups = "keep"),
+  aes(x = "", y = cat, fill = cat)) + 
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar(theta = "y", start = 0) +
+  theme_void() +
+  geom_text(aes(x = "", y = cat, label = user_type), position = position_stack(vjust = 0.5)) +
+  labs(fill = 'Age category')
+```
+
+```{R Share-map-leaflet}
+#plot map
+col <- colorNumeric(palette = "YlOrRd", domain = NULL)
+
+bind_rows(
+  db %>% 
+    tbl("trips") %>%
+    filter(between(start_time, unixepoch(!!params$date[1]), unixepoch(!!params$date[2]))) %>%
+    select(from_station_id, start_time) %>%
+    rename(id = from_station_id, time = start_time) %>%
+    as_tibble(),
+  db %>% 
+    tbl("trips") %>%
+    filter(between(end_time, unixepoch(!!params$date[1]), unixepoch(!!params$date[2]))) %>%
+    select(to_station_id, end_time) %>%
+    rename(id = to_station_id, time = end_time) %>%
+    as_tibble()
+    ) %>%
+  group_by(id) %>%
+  summarise(freq = n(), .groups = "keep") %>%
+  inner_join(
+    db %>%
+      tbl("stations") %>%
+      select(id, name, status, longitude, latitude) %>%
+      as_tibble(),
+    by = "id"
+    ) %>%
+  as_tibble() %>%
+  st_as_sf(coords = c("longitude", "latitude"), remove = TRUE) %>%
+  leaflet() %>%
+  addTiles() %>%
+  addCircleMarkers(
+    label = ~name,
+    color = ~col(freq),
+    stroke = ~ifelse(status,TRUE, FALSE),
+    fillOpacity = 0.8) %>%
+  addLegend("bottomright",
+            pal = col,
+            values = ~freq,
+            title = 'Chicago Divvy station usage')
+```
+
+# Act
+
+1.  None subscribers tend to take trips around the holiday building a subscription plan tailored to their needs might convince them to buy that plan.
+2.  None subscribers tend to have an average trip length than subscribers having a subscription reward program might incentive's them to subscribe to accumulate points.
+3.  Users between 13-17 don't tend to use bikes compared to other age groups, doing a special subscription for under aged users would tend to attract more subscribes of the a age group and they might keep being users when they grow up.
